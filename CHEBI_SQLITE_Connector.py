@@ -1,4 +1,6 @@
-from util import RESOURCES_FOLDER,download_file_ftp,gunzip
+import os
+import sqlite3
+from source.Utils.util import RESOURCES_FOLDER,download_file_ftp,gunzip
 
 
 
@@ -9,7 +11,7 @@ class CHEBI_SQLITE_Connector():
     '''
     def __init__(self):
         self.insert_step=50000
-        self.db_file = f'{RESOURCES_FOLDER}chebi2others.db'
+        self.db_file = f'{RESOURCES_FOLDER}chebi.db'
         self.download_chebi()
 
         if os.path.exists(self.db_file):
@@ -18,8 +20,24 @@ class CHEBI_SQLITE_Connector():
             self.create_sql_table()
 
 
+    def start_sqlite_cursor(self):
+        self.sqlite_connection = sqlite3.connect(self.db_file)
+        self.cursor = self.sqlite_connection.cursor()
+
+    def commit_and_close_sqlite_cursor(self):
+        self.sqlite_connection.commit()
+        self.sqlite_connection.close()
+
+    def close_sql_connection(self):
+        self.sqlite_connection.close()
+
+    def check_table(self):
+        self.cursor.execute("SELECT * FROM CHEBI2OTHERS limit 10")
+        res_fetch = self.cursor.fetchall()
+        print(res_fetch)
 
     def trim_chebi_obo(self,infile_path,outfile_path):
+        a=set()
         with open(infile_path) as infile:
             with open(outfile_path,'a+') as outfile:
                 line=infile.readline()
@@ -31,9 +49,21 @@ class CHEBI_SQLITE_Connector():
                         current_info=line.split('CHEBI:')[1].strip()
                         outline=f'{main_id}\tchebi\t{current_info}'
                         outfile.write(f'{outline}\n')
+                    elif line.startswith('property_value:'):
+                        line=line.split()
+                        if len(line)==4:
+                            link_type,current_info=line[1],line[2]
+                            current_info=current_info.strip('\"')
+                            if link_type.endswith('formula'): link_type='chemical_formula'
+                            elif link_type.endswith('smiles'): link_type='smiles'
+                            elif link_type.endswith('inchikey'): link_type='inchi_key'
+                            else: link_type=None
+                            if link_type:
+                                outline=f'{main_id}\t{link_type}\t{current_info}'
+                                outfile.write(f'{outline}\n')
+                                a.add(link_type)
                     line=infile.readline()
-
-
+        print(a)
 
 
     def trim_chebi_accession(self,infile_path,outfile_path):
@@ -91,33 +121,16 @@ class CHEBI_SQLITE_Connector():
             self.download_chebi_obo()
 
     def get_chebi_to_others(self):
-        res = []
-        outfile_path = f'{RESOURCES_FOLDER}chebi2others.tsv'
-        with open(outfile_path) as file:
+        input_path = f'{RESOURCES_FOLDER}chebi2others.tsv'
+        with open(input_path) as file:
             line = file.readline()
             while line:
                 line = line.strip('\n')
                 if line:
                     current_chebi_id, db, db_id = line.split('\t')
-                    res.append([current_chebi_id, db, db_id])
+                    yield current_chebi_id, db, db_id
                 line = file.readline()
-        return res
-
-    def start_sqlite_cursor(self):
-        self.sqlite_connection = sqlite3.connect(self.db_file)
-        self.cursor = self.sqlite_connection.cursor()
-
-    def commit_and_close_sqlite_cursor(self):
-        self.sqlite_connection.commit()
-        self.sqlite_connection.close()
-
-    def close_sql_connection(self):
-        self.sqlite_connection.close()
-
-    def check_all_tables(self):
-        self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        all_tables = self.cursor.fetchall()
-        print(all_tables)
+        os.remove(input_path)
 
 
 
@@ -133,15 +146,28 @@ class CHEBI_SQLITE_Connector():
                             f'CHEBI INTEGER,' \
                             f'DATABASE TEXT,' \
                             f'ALTID  TEXT )'
+
         self.cursor.execute(create_table_command)
+
+        create_index_command = f'CREATE INDEX CHEBI_IDX ON CHEBI2OTHERS (CHEBI)'
+        self.cursor.execute(create_index_command)
+
         self.sqlite_connection.commit()
         self.store_chebi2others()
 
 
-    def generate_inserts(self, chebi2others):
+    def generate_inserts(self, input_generator):
         step=self.insert_step
-        for i in range(0, len(chebi2others), step):
-            yield chebi2others[i:i + step]
+        temp=[]
+        for i in input_generator:
+            if len(temp)<step:
+                temp.append(i)
+            elif len(temp)==step:
+                yield temp
+                temp=[]
+        yield temp
+
+
 
 
     def store_chebi2others(self):
@@ -154,6 +180,8 @@ class CHEBI_SQLITE_Connector():
 
     def fetch_chebi_id_info(self,chebi_id):
         res={}
+        try:    chebi_id=int(chebi_id)
+        except: return res
         fetch_command = f"SELECT CHEBI,DATABASE, ALTID FROM CHEBI2OTHERS WHERE CHEBI = {chebi_id}"
         res_fetch=self.cursor.execute(fetch_command).fetchall()
         for i in res_fetch:
@@ -162,9 +190,15 @@ class CHEBI_SQLITE_Connector():
             res[db].add(alt_id)
         return res
 
+    def fetch_all_chebi_ids(self):
+        res=set()
+        fetch_command = f"SELECT CHEBI FROM CHEBI2OTHERS"
+        res_fetch=self.cursor.execute(fetch_command).fetchall()
+        for i in res_fetch:
+            res.add(i[0])
 
 
 if __name__ == '__main__':
     sql=CHEBI_SQLITE_Connector()
-    alt_ids=sql.fetch_chebi_id_info('5900')
+    alt_ids=sql.fetch_chebi_id_info('15377')
     print(alt_ids)
